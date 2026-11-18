@@ -1,0 +1,126 @@
+
+#include <Arduino.h>
+
+#define pinTrigger 9
+#define pinEcho    2
+
+const float LIMITE_CM = 10.0;
+const float DISTANCIA_MAXIMA_CM = 100.0;
+const unsigned long INTERVALO_MEDIDA_MS = 60;
+const unsigned long LARGURA_TRIGGER_US = 10;
+const unsigned long TIMEOUT_SUBIDA_US = 30000;   // espera máx. pelo início do eco
+const unsigned long TIMEOUT_ECO_US = 30000;      // largura máx. do pulso (~5 m)
+const unsigned long INTERVALO_ARCO_MS = 7000;
+const int ARCOS_PARA_PARAR = 2;
+
+enum EstadoSensor { OCIOSO, TRIGGER, ESPERA_SUBIDA, MEDINDO };
+EstadoSensor estado = OCIOSO;
+
+unsigned long ultimaMedidaMs = 0;
+unsigned long triggerInicioUs = 0;
+unsigned long esperaInicioUs = 0;
+unsigned long echoInicioUs = 0;
+
+int contadorArcos = 0;
+unsigned long ultimaDeteccaoMs = 0;
+bool chegou = false;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(pinTrigger, OUTPUT);
+  pinMode(pinEcho, INPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(pinTrigger, LOW);
+  digitalWrite(LED_BUILTIN, LOW);
+
+  Serial.println(F("Teste (sem interrupcao) iniciado. Aguardando arco de largada..."));
+}
+
+void registrarDeteccao(unsigned long agoraMs) {
+  bool emBloqueio = (contadorArcos > 0) &&
+                    (agoraMs - ultimaDeteccaoMs < INTERVALO_ARCO_MS);
+  if (emBloqueio) {
+    Serial.println(F("  (ignorado: aguardando intervalo de 7 s)"));
+    return;
+  }
+
+  contadorArcos++;
+  ultimaDeteccaoMs = agoraMs;
+
+  Serial.print(F(">>> Arco detectado. Contador = "));
+  Serial.println(contadorArcos);
+
+  if (contadorArcos < ARCOS_PARA_PARAR) {
+    Serial.println(F(">>> LARGADA: carrinho segue a corrida"));
+  } else {
+    chegou = true;
+    digitalWrite(LED_BUILTIN, HIGH);   // no robô: chamar parar() aqui
+    Serial.println(F(">>> CHEGADA: PARAR!"));
+  }
+}
+
+void processarMedida(unsigned long duracaoUs) {
+  float distanciaCm = duracaoUs / 58.0;   // = duração * 0,0343 / 2
+
+  if (distanciaCm > 0 && distanciaCm <= DISTANCIA_MAXIMA_CM) {
+    Serial.print(F("Distancia: "));
+    Serial.print(distanciaCm, 1);
+    Serial.println(F(" cm"));
+
+    if (distanciaCm <= LIMITE_CM) {
+      registrarDeteccao(millis());
+    }
+  }
+}
+
+// Avança a máquina de estados do sensor. Chamada a cada passada do loop().
+void atualizarUltrassom() {
+  switch (estado) {
+
+    case OCIOSO:
+      if (millis() - ultimaMedidaMs >= INTERVALO_MEDIDA_MS) {
+        ultimaMedidaMs = millis();
+        digitalWrite(pinTrigger, HIGH);
+        triggerInicioUs = micros();
+        estado = TRIGGER;
+      }
+      break;
+
+    case TRIGGER:
+      if (micros() - triggerInicioUs >= LARGURA_TRIGGER_US) {
+        digitalWrite(pinTrigger, LOW);
+        esperaInicioUs = micros();
+        estado = ESPERA_SUBIDA;
+      }
+      break;
+
+    case ESPERA_SUBIDA:
+      if (digitalRead(pinEcho) == HIGH) {         // borda de subida
+        echoInicioUs = micros();
+        estado = MEDINDO;
+      } else if (micros() - esperaInicioUs > TIMEOUT_SUBIDA_US) {
+        Serial.println(F("Sem eco (fiacao errada ou sensor sem resposta)"));
+        estado = OCIOSO;
+      }
+      break;
+
+    case MEDINDO:
+      if (digitalRead(pinEcho) == LOW) {          // borda de descida
+        unsigned long duracao = micros() - echoInicioUs;
+        estado = OCIOSO;
+        processarMedida(duracao);
+      } else if (micros() - echoInicioUs > TIMEOUT_ECO_US) {
+        Serial.println(F("Fora de alcance"));
+        estado = OCIOSO;
+      }
+      break;
+  }
+}
+
+void loop() {
+  if (chegou) {
+    return;   // corrida terminada: não mede mais
+  }
+
+  atualizarUltrassom();
+}
